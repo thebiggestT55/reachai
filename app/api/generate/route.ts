@@ -11,6 +11,16 @@ const PLAN_LIMITS: Record<string, number> = {
   teams: Infinity
 }
 
+const FORMAT_RULES = `
+
+Formatting rules: Use simple markdown only — **bold** for labels, plain paragraphs for message bodies. Never use headers (#), horizontal rules (---), or bullet-point explanations of why the copy works. Do not add commentary, analysis, or a "why this works" section. Just return the messages themselves, clearly labeled.`
+
+const SYSTEM_PROMPTS: Record<string, string> = {
+  cold_email: `You are an expert cold outreach specialist. Write a single personalized cold email (subject line + body, under 100 words) based on the prospect info given. Rules: first line references something specific about them, never start with "I", no buzzwords like synergy/leverage/streamline, one clear CTA, subject line is 3-6 words lowercase.${FORMAT_RULES}`,
+  linkedin_dm: `You are an expert at LinkedIn outreach. Write a LinkedIn connection request message (under 300 characters) AND a follow-up message for after they accept, based on the prospect info given. Rules: reference something specific about them, conversational tone, one clear ask.${FORMAT_RULES}`,
+  follow_up: `You are an expert at sales follow-ups. Write 2 follow-up messages for a prospect who hasn't replied to a previous cold email — one for day 3, one for day 7. Rules: don't repeat the original pitch, add new value or a different angle each time, keep each under 60 words, one CTA.${FORMAT_RULES}`
+}
+
 export async function POST(req: Request) {
   const cookieStore = await cookies()
 
@@ -50,41 +60,35 @@ export async function POST(req: Request) {
 
   const limit = PLAN_LIMITS[profile?.plan ?? 'free']
   if (messagesToday >= limit) {
-    return NextResponse.json({
-      error: 'Daily limit reached',
-      upgradeUrl: '/pricing'
-    }, { status: 429 })
+    return NextResponse.json({ error: 'Daily limit reached', upgradeUrl: '/pricing' }, { status: 429 })
   }
 
-  const { prospectInfo } = await req.json()
+  const { prospectInfo, toolType } = await req.json()
+  const systemPrompt = SYSTEM_PROMPTS[toolType] ?? SYSTEM_PROMPTS.cold_email
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
-    system: `You are an expert cold outreach specialist with 10+ years of experience writing emails and LinkedIn messages that get replies. You write in a direct, human, and conversational tone — never corporate or salesy.
-
-When given prospect information, generate exactly three things:
-1. A cold email (subject line + body, under 100 words)
-2. A LinkedIn connection message (under 300 characters)
-3. A LinkedIn follow-up message for if they connected but didn't reply
-
-Rules:
-- First line must reference something specific about THEM
-- Never start with "I" or "My name is"
-- No buzzwords: synergy, leverage, streamline, game-changer
-- One clear CTA per message, never two asks
-- Subject lines: 3-6 words, lowercase, curiosity-driven
-
-After generating, ask: "Want me to A/B test the subject line or adjust the tone?"`,
+    system: systemPrompt,
     messages: [{ role: 'user', content: prospectInfo }]
   })
+
+  const resultText = message.content[0].type === 'text' ? message.content[0].text : ''
 
   await supabase.from('users')
     .update({ messages_today: messagesToday + 1 })
     .eq('id', user.id)
 
+  // Save to history
+  await supabase.from('generations').insert({
+    user_id: user.id,
+    tool_type: toolType ?? 'cold_email',
+    prospect_info: prospectInfo,
+    result: resultText
+  })
+
   return NextResponse.json({
-    result: message.content[0].type === 'text' ? message.content[0].text : '',
+    result: resultText,
     messagesRemaining: limit === Infinity ? null : limit - messagesToday - 1
   })
 }
